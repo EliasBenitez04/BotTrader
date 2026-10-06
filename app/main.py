@@ -14,7 +14,10 @@ settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
-    description="Binance Spot trading research, paper trading, backtesting and controlled execution.",
+    description=(
+        "Binance Spot trading research, paper trading, backtesting "
+        "and controlled execution."
+    ),
 )
 
 

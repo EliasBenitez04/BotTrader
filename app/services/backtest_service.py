@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from app.backtesting.engine import BacktestResult, Backtester
+from app.backtesting.engine import Backtester, BacktestResult
 from app.core.config import Settings
 from app.db.models import BacktestRun, BacktestTrade
 from app.market.binance import BinanceMarketClient

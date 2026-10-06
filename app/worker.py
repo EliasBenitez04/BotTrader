@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import text
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def _heartbeat(db) -> None:
     row = db.get(RuntimeState, "worker_heartbeat")
-    value = datetime.now(timezone.utc).isoformat()
+    value = datetime.now(UTC).isoformat()
     if row:
         row.value = value
     else:

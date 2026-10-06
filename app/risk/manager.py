@@ -62,7 +62,11 @@ class RiskManager:
 
         return RiskDecision(allowed=not reasons, reasons=reasons)
 
-    def build_levels(self, entry_price: float, atr_value: float | None = None) -> tuple[float, float]:
+    def build_levels(
+        self,
+        entry_price: float,
+        atr_value: float | None = None,
+    ) -> tuple[float, float]:
         if entry_price <= 0:
             raise ValueError("entry_price must be positive")
 

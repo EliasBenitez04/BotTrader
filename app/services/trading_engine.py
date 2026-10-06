@@ -1,7 +1,7 @@
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -247,11 +247,13 @@ class TradingEngine:
             stop_loss=Decimal(str(stop_loss)),
             take_profit=Decimal(str(take_profit)),
             entry_score=decision.score,
-            entry_time=datetime.now(timezone.utc),
+            entry_time=datetime.now(UTC),
             fees_quote=Decimal(str(execution.fee_quote)),
             binance_order_id=execution.order_id,
             client_order_id=execution.client_order_id or client_order_id,
-            protection_status="NOT_REQUIRED" if self.settings.trading_mode == "PAPER" else "PENDING",
+            protection_status=(
+                "NOT_REQUIRED" if self.settings.trading_mode == "PAPER" else "PENDING"
+            ),
         )
         self.db.add(trade)
         self.db.flush()
@@ -388,7 +390,7 @@ class TradingEngine:
 
         trade.status = "CLOSED"
         trade.exit_price = Decimal(str(execution.fill_price))
-        trade.exit_time = datetime.now(timezone.utc)
+        trade.exit_time = datetime.now(UTC)
         trade.pnl_quote = Decimal(str(net_pnl))
         trade.pnl_percent = Decimal(str(pnl_percent))
         trade.fees_quote = Decimal(str(total_fees))

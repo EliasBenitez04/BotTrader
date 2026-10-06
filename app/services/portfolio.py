@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -34,7 +34,7 @@ class PortfolioStateService:
         return sum(float(value or 0) for value in rows)
 
     def today_realized_pnl(self, mode: str) -> float:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         rows = self.db.execute(
             select(Trade).where(
                 Trade.mode == mode,
@@ -75,7 +75,7 @@ class PortfolioStateService:
         return count
 
     def risk_snapshot(self, *, mode: str, equity: float) -> RiskSnapshot:
-        today_key = f"day_start_equity:{mode}:{datetime.now(timezone.utc).date().isoformat()}"
+        today_key = f"day_start_equity:{mode}:{datetime.now(UTC).date().isoformat()}"
         peak_key = f"peak_equity:{mode}"
 
         day_start_raw = self._get_state(today_key)
