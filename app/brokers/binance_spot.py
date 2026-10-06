@@ -9,7 +9,11 @@ import httpx
 
 from app.brokers.base import Broker, ExecutionResult
 from app.core.config import Settings
-from app.core.exceptions import BinanceAPIError, LiveTradingNotArmedError
+from app.core.exceptions import (
+    BinanceAPIError,
+    LiveTradingNotArmedError,
+    ProtectionStateError,
+)
 
 
 class BinanceSpotBroker(Broker):
@@ -86,8 +90,19 @@ class BinanceSpotBroker(Broker):
             )
 
         if response.status_code >= 400:
+            try:
+                error_payload = response.json()
+            except ValueError:
+                error_payload = {}
+            error_code = error_payload.get("code")
+            unknown_codes = {-1006, -1007}
+            unknown_execution = (
+                method.upper() in {"POST", "DELETE"}
+                and error_code in unknown_codes
+            )
             raise BinanceAPIError(
-                f"Binance HTTP {response.status_code}: {response.text[:500]}"
+                f"Binance HTTP {response.status_code}: {response.text[:500]}",
+                unknown_execution=unknown_execution,
             )
 
         return response.json()
@@ -245,7 +260,7 @@ class BinanceSpotBroker(Broker):
         )
         for balance in payload.get("balances", []):
             if balance.get("asset") == quote_asset:
-                return float(balance.get("free", 0)) + float(balance.get("locked", 0))
+                return float(balance.get("free", 0))
         return 0.0
 
     async def place_oco_protection(
@@ -332,7 +347,9 @@ class BinanceSpotBroker(Broker):
                 client_order_id=detail.get("clientOrderId"),
             )
 
-        return None
+        raise ProtectionStateError(
+            f"OCO order list {order_list_id} completed without a filled protection leg"
+        )
 
     async def cancel_protection(self, *, symbol: str, order_list_id: str) -> None:
         await self._signed_request(

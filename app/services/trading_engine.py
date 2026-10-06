@@ -12,7 +12,12 @@ from app.brokers.base import Broker, ExecutionResult
 from app.brokers.binance_spot import BinanceSpotBroker
 from app.brokers.paper import PaperBroker
 from app.core.config import Settings
-from app.core.exceptions import BinanceAPIError, MarketDataError, RiskRejectedError
+from app.core.exceptions import (
+    BinanceAPIError,
+    MarketDataError,
+    ProtectionStateError,
+    RiskRejectedError,
+)
 from app.db.models import RiskEvent, Signal, Trade
 from app.market.binance import BinanceMarketClient
 from app.risk.manager import RiskLimits, RiskManager
@@ -102,6 +107,17 @@ class TradingEngine:
         timeframe: str,
         decision: StrategyDecision,
     ) -> Signal:
+        if decision.candle_close_time is not None:
+            existing = self.db.execute(
+                select(Signal).where(
+                    Signal.symbol == symbol,
+                    Signal.timeframe == timeframe,
+                    Signal.candle_close_time == decision.candle_close_time,
+                )
+            ).scalars().first()
+            if existing:
+                return existing
+
         signal = Signal(
             symbol=symbol,
             timeframe=timeframe,
@@ -232,6 +248,7 @@ class TradingEngine:
                 equity += float(trade.quantity) * (
                     current - float(trade.entry_price)
                 )
+                equity -= float(trade.fees_quote or 0)
             return equity
 
         quote_balance = await self.broker.quote_balance(self.settings.quote_asset)
@@ -240,6 +257,16 @@ class TradingEngine:
             current = await self.market.ticker_price(trade.symbol)
             equity += float(trade.quantity) * current
         return equity
+
+    async def _available_quote(self) -> float:
+        if self.settings.trading_mode == "LIVE":
+            return await self.broker.quote_balance(self.settings.quote_asset)
+
+        cash = self.settings.paper_initial_capital + self.portfolio.realized_pnl("PAPER")
+        for trade in self.portfolio.open_trades("PAPER"):
+            cash -= float(trade.quantity) * float(trade.entry_price)
+            cash -= float(trade.fees_quote or 0)
+        return max(0.0, cash)
 
     async def _execute_market_safely(
         self,
@@ -391,7 +418,19 @@ class TradingEngine:
             if decision.candle_close_time
             else int(time.time() * 1000)
         )
-        client_order_id = f"BT{symbol}{candle_ms}"[:36]
+        available_quote = await self._available_quote()
+        fee_buffer = 1 + (self.settings.trading_fee_bps / 10_000)
+        max_affordable = (
+            available_quote / (decision.price * fee_buffer)
+            if decision.price > 0
+            else 0.0
+        )
+        quantity = min(quantity, max_affordable)
+        if quantity <= 0:
+            raise RiskRejectedError("Insufficient available quote balance")
+
+        mode_code = "L" if self.settings.trading_mode == "LIVE" else "P"
+        client_order_id = f"BT{mode_code}{symbol}{candle_ms}"[:36]
         execution = await self._execute_market_safely(
             symbol=symbol,
             side="BUY",
@@ -503,10 +542,27 @@ class TradingEngine:
             and trade.protection_order_list_id
             and trade.protection_status == "ACTIVE"
         ):
-            fill = await self.broker.get_protection_fill(
-                symbol=trade.symbol,
-                order_list_id=trade.protection_order_list_id,
-            )
+            try:
+                fill = await self.broker.get_protection_fill(
+                    symbol=trade.symbol,
+                    order_list_id=trade.protection_order_list_id,
+                )
+            except ProtectionStateError as exc:
+                trade.protection_status = "FAILED"
+                trade.last_error = str(exc)
+                self._halt_live(
+                    reason="Exchange-side OCO protection is no longer safe",
+                    symbol=trade.symbol,
+                    context={"trade_id": trade.id, "error": str(exc)},
+                )
+                self.db.commit()
+                return {
+                    "action": "MANUAL_RECONCILIATION",
+                    "trade_id": trade.id,
+                    "symbol": trade.symbol,
+                    "reason": str(exc),
+                }
+
             if fill:
                 self._finalize_trade(trade, fill, "EXCHANGE_PROTECTION")
                 trade.protection_status = "FILLED"

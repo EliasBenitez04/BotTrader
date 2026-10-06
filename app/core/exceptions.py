@@ -14,6 +14,10 @@ class BinanceAPIError(BotTraderError):
         self.unknown_execution = unknown_execution
 
 
+class ProtectionStateError(BotTraderError):
+    """Raised when exchange-side protection is no longer in a safe state."""
+
+
 class RiskRejectedError(BotTraderError):
     """Raised when the risk engine rejects a new trade."""
 
