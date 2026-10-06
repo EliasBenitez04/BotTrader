@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BotTrader</title>
+  <style>
+    :root{font-family:Inter,Segoe UI,Arial,sans-serif;background:#0b1020;color:#e8ecf5}
+    *{box-sizing:border-box} body{margin:0;background:linear-gradient(160deg,#0b1020,#111a2e);min-height:100vh}
+    main{max-width:1180px;margin:auto;padding:28px 18px 60px}
+    header{display:flex;justify-content:space-between;gap:20px;align-items:flex-end;margin-bottom:24px}
+    h1{margin:0;font-size:30px} .muted{color:#93a0b8}.badge{padding:7px 12px;border-radius:999px;background:#1f2a44;font-size:12px;font-weight:700}
+    .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{background:rgba(18,27,48,.94);border:1px solid #263452;border-radius:16px;padding:18px;box-shadow:0 14px 35px rgba(0,0,0,.18)}
+    .label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#8fa0bd}.value{font-size:26px;font-weight:800;margin-top:8px}
+    section{margin-top:18px}.two{display:grid;grid-template-columns:1.2fr .8fr;gap:14px}
+    table{width:100%;border-collapse:collapse;margin-top:10px}th,td{text-align:left;padding:10px;border-bottom:1px solid #263452;font-size:13px}
+    th{color:#8fa0bd;font-weight:600}.buy{color:#49d17d}.sell{color:#ff6b72}.wait{color:#f2c14e}
+    form{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}input,select,button{border-radius:10px;border:1px solid #32415f;background:#0e1629;color:#e8ecf5;padding:10px 12px}
+    button{cursor:pointer;background:#2b68ff;border-color:#2b68ff;font-weight:700}.result{margin-top:12px;white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+    .event{padding:10px 0;border-bottom:1px solid #263452}.critical{color:#ff6b72}.warning{color:#f2c14e}
+    @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}}
+    @media(max-width:520px){.grid{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><div class="muted">Trading algorítmico · Binance Spot</div><h1>BotTrader Dashboard</h1></div>
+    <div id="mode" class="badge">Cargando…</div>
+  </header>
+
+  <div class="grid">
+    <div class="card"><div class="label">Equity PAPER realizada</div><div id="equity" class="value">—</div></div>
+    <div class="card"><div class="label">PnL realizado</div><div id="pnl" class="value">—</div></div>
+    <div class="card"><div class="label">Win rate</div><div id="winrate" class="value">—</div></div>
+    <div class="card"><div class="label">Posiciones abiertas</div><div id="open" class="value">—</div></div>
+  </div>
+
+  <section class="two">
+    <div class="card">
+      <div class="label">Últimas señales</div>
+      <table><thead><tr><th>Par</th><th>Señal</th><th>Score</th><th>Precio</th><th>RSI</th></tr></thead><tbody id="signals"></tbody></table>
+    </div>
+    <div class="card">
+      <div class="label">Analizar ahora</div>
+      <form id="analyze-form">
+        <select id="symbol"><option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option></select>
+        <select id="timeframe"><option>5m</option><option>15m</option><option>1h</option><option>4h</option></select>
+        <button type="submit">Analizar</button>
+      </form>
+      <div id="analysis" class="result muted">No ejecutado.</div>
+    </div>
+  </section>
+
+  <section class="two">
+    <div class="card">
+      <div class="label">Posiciones</div>
+      <table><thead><tr><th>Par</th><th>Entrada</th><th>SL</th><th>TP</th><th>Protección</th></tr></thead><tbody id="positions"></tbody></table>
+    </div>
+    <div class="card">
+      <div class="label">Último backtest</div>
+      <div id="backtest" class="result muted">Sin datos.</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="label">Eventos de riesgo</div>
+    <div id="events" class="muted">Sin eventos.</div>
+  </section>
+</main>
+<script>
+const fmt=n=>n==null?"—":Number(n).toLocaleString("es-PY",{maximumFractionDigits:4});
+const signalClass=s=>s==="BUY"?"buy":s==="SELL"?"sell":"wait";
+
+async function load(){
+  const r=await fetch("/api/v1/dashboard/summary");
+  const d=await r.json();
+  document.getElementById("mode").textContent=d.mode+(d.mode==="LIVE"?(d.live_armed?" · ARMADO":" · BLOQUEADO"):" · SEGURO");
+  document.getElementById("equity").textContent=d.paper_equity_realized==null?"LIVE":fmt(d.paper_equity_realized)+" USDT";
+  document.getElementById("pnl").textContent=fmt(d.realized_pnl)+" USDT";
+  document.getElementById("winrate").textContent=fmt(d.win_rate)+"%";
+  document.getElementById("open").textContent=d.open_trades.length;
+
+  document.getElementById("signals").innerHTML=(d.signals||[]).map(s=>`<tr><td>${s.symbol}</td><td class="${signalClass(s.signal)}">${s.signal}</td><td>${s.score}</td><td>${fmt(s.price)}</td><td>${fmt(s.rsi)}</td></tr>`).join("")||'<tr><td colspan="5" class="muted">Sin señales todavía</td></tr>';
+  document.getElementById("positions").innerHTML=(d.open_trades||[]).map(t=>`<tr><td>${t.symbol}</td><td>${fmt(t.entry_price)}</td><td>${fmt(t.stop_loss)}</td><td>${fmt(t.take_profit)}</td><td>${t.protection_status}</td></tr>`).join("")||'<tr><td colspan="5" class="muted">Sin posiciones abiertas</td></tr>';
+
+  const b=d.latest_backtest;
+  document.getElementById("backtest").textContent=b?JSON.stringify({par:b.symbol,timeframe:b.timeframe,trades:b.total_trades,win_rate:b.win_rate,profit_factor:b.profit_factor,max_drawdown:b.max_drawdown,retorno:b.return_pct,muestra_suficiente:b.statistically_sufficient},null,2):"Sin backtests guardados.";
+  document.getElementById("events").innerHTML=(d.risk_events||[]).map(e=>`<div class="event"><strong class="${e.severity.toLowerCase()}">${e.severity}</strong> · ${e.type} ${e.symbol||""}<br><span class="muted">${e.message}</span></div>`).join("")||"Sin eventos.";
+}
+document.getElementById("analyze-form").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const s=document.getElementById("symbol").value;
+  const tf=document.getElementById("timeframe").value;
+  const out=document.getElementById("analysis");
+  out.textContent="Analizando…";
+  try{
+    const r=await fetch(`/api/v1/market/analyze/${s}?timeframe=${encodeURIComponent(tf)}`);
+    const d=await r.json();
+    out.textContent=JSON.stringify(d,null,2);
+  }catch(err){out.textContent=String(err)}
+});
+load().catch(console.error);
+setInterval(()=>load().catch(console.error),30000);
+</script>
+</body>
+</html>

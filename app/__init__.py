@@ -1,0 +1,1 @@
+"""BotTrader application package."""
