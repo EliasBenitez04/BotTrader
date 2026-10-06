@@ -37,7 +37,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: ruff check app tests
       - run: python -m compileall -q app
-      - run: pytest -q
+      - run: python -m pytest -q
       - run: alembic upgrade head
       - run: alembic downgrade base
       - run: alembic upgrade head
