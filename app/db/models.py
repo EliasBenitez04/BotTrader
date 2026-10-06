@@ -81,6 +81,9 @@ class Trade(Base):
     exit_reason = Column(String(40))
     binance_order_id = Column(String(64))
     client_order_id = Column(String(64), unique=True)
+    protection_order_list_id = Column(String(64))
+    protection_status = Column(String(24), nullable=False, default="NOT_REQUIRED")
+    last_error = Column(Text)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(
         DateTime(timezone=True),

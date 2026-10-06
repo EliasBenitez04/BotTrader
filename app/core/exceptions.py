@@ -9,6 +9,10 @@ class MarketDataError(BotTraderError):
 class BinanceAPIError(BotTraderError):
     """Raised when Binance returns an API or transport error."""
 
+    def __init__(self, message: str, *, unknown_execution: bool = False):
+        super().__init__(message)
+        self.unknown_execution = unknown_execution
+
 
 class RiskRejectedError(BotTraderError):
     """Raised when the risk engine rejects a new trade."""
