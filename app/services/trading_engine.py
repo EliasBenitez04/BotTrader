@@ -167,7 +167,7 @@ class TradingEngine:
 
     def _symbol_lock_id(self, symbol: str, timeframe: str) -> int:
         raw = (
-            f"{self.settings.trading_mode}:{symbol.upper()}:{timeframe}".encode("utf-8")
+            f"{self.settings.trading_mode}:{symbol.upper()}:{timeframe}".encode()
         )
         digest = hashlib.blake2b(raw, digest_size=8).digest()
         return int.from_bytes(digest, byteorder="big", signed=True)
@@ -265,7 +265,10 @@ class TradingEngine:
                     trade.protection_status = "UNKNOWN"
                     trade.last_error = str(exc)
                 self._halt_live(
-                    reason="Binance order execution state is unknown; manual reconciliation required",
+                    reason=(
+                        "Binance order execution state is unknown; "
+                        "manual reconciliation required"
+                    ),
                     symbol=symbol,
                     context={
                         "side": side,
