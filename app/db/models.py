@@ -11,6 +11,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 
 from app.db.base import Base
@@ -55,9 +56,21 @@ class Signal(Base):
     atr = Column(Numeric(24, 10))
     volume_ratio = Column(Numeric(16, 8))
     reasons_json = Column(Text, nullable=False, default="[]")
+    candle_open_time = Column(DateTime(timezone=True))
+    candle_close_time = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
-    __table_args__ = (Index("ix_signal_symbol_created", "symbol", "created_at"),)
+    __table_args__ = (
+        Index("ix_signal_symbol_created", "symbol", "created_at"),
+        Index(
+            "uq_signal_symbol_tf_candle",
+            "symbol",
+            "timeframe",
+            "candle_close_time",
+            unique=True,
+            postgresql_where=text("candle_close_time IS NOT NULL"),
+        ),
+    )
 
 
 class Trade(Base):

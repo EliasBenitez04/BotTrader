@@ -35,3 +35,8 @@ class TickRequest(BaseModel):
         if value is not None and value not in SUPPORTED_INTERVALS:
             raise ValueError(f"Unsupported timeframe: {value}")
         return value
+
+
+class HaltClearRequest(BaseModel):
+    confirm_reconciled: bool
+    note: str = Field(default="", max_length=500)

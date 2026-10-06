@@ -1,21 +1,23 @@
+import hashlib
 import json
 import logging
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.brokers.base import Broker, ExecutionResult
 from app.brokers.binance_spot import BinanceSpotBroker
 from app.brokers.paper import PaperBroker
 from app.core.config import Settings
-from app.core.exceptions import BinanceAPIError, RiskRejectedError
+from app.core.exceptions import BinanceAPIError, MarketDataError, RiskRejectedError
 from app.db.models import RiskEvent, Signal, Trade
 from app.market.binance import BinanceMarketClient
 from app.risk.manager import RiskLimits, RiskManager
 from app.services.portfolio import PortfolioStateService
+from app.services.runtime_state import RuntimeStateService
 from app.strategy.scoring import StrategyDecision, analyze_frame
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ class TradingEngine:
             )
         )
         self.portfolio = PortfolioStateService(db)
+        self.runtime = RuntimeStateService(db)
 
     async def __aenter__(self) -> "TradingEngine":
         return self
@@ -62,6 +65,13 @@ class TradingEngine:
         await self.market.close()
         await self.broker.close()
 
+    def live_halt_status(self) -> dict | None:
+        return self.runtime.live_halt()
+
+    def clear_live_halt(self) -> None:
+        self.runtime.clear_live_halt()
+        self.db.commit()
+
     async def analyze(self, symbol: str, timeframe: str | None = None) -> StrategyDecision:
         interval = timeframe or self.settings.default_timeframe
         frame = await self.market.klines(
@@ -69,8 +79,16 @@ class TradingEngine:
             interval,
             limit=self.settings.market_lookback_candles,
         )
+        server_time_ms = await self.market.server_time_ms()
+        closed = frame.loc[frame["close_time_ms"] < server_time_ms].copy()
+
+        if len(closed) < 210:
+            raise MarketDataError(
+                f"Not enough closed candles for {symbol.upper()} {interval}: {len(closed)}"
+            )
+
         _, decision = analyze_frame(
-            frame,
+            closed,
             buy_threshold=self.settings.buy_score_threshold,
             sell_threshold=self.settings.sell_score_threshold,
             rsi_period=self.settings.rsi_period,
@@ -99,6 +117,8 @@ class TradingEngine:
             atr=Decimal(str(decision.atr)),
             volume_ratio=Decimal(str(decision.volume_ratio)),
             reasons_json=json.dumps(decision.reasons, ensure_ascii=False),
+            candle_open_time=decision.candle_open_time,
+            candle_close_time=decision.candle_close_time,
         )
         self.db.add(signal)
         self.db.flush()
@@ -123,6 +143,75 @@ class TradingEngine:
             )
         )
 
+    def _halt_live(
+        self,
+        *,
+        reason: str,
+        symbol: str | None,
+        context: dict | None = None,
+    ) -> None:
+        if self.settings.trading_mode != "LIVE":
+            return
+        payload = self.runtime.halt_live(
+            reason=reason,
+            symbol=symbol,
+            context=context,
+        )
+        self._risk_event(
+            "LIVE_TRADING_HALTED",
+            "CRITICAL",
+            reason,
+            symbol=symbol,
+            context=payload,
+        )
+
+    def _symbol_lock_id(self, symbol: str, timeframe: str) -> int:
+        raw = (
+            f"{self.settings.trading_mode}:{symbol.upper()}:{timeframe}".encode("utf-8")
+        )
+        digest = hashlib.blake2b(raw, digest_size=8).digest()
+        return int.from_bytes(digest, byteorder="big", signed=True)
+
+    def _acquire_symbol_lock(self, symbol: str, timeframe: str) -> bool:
+        lock_id = self._symbol_lock_id(symbol, timeframe)
+        return bool(
+            self.db.execute(
+                text("SELECT pg_try_advisory_xact_lock(:lock_id)"),
+                {"lock_id": lock_id},
+            ).scalar()
+        )
+
+    def _last_candle_key(self, symbol: str, timeframe: str) -> str:
+        return (
+            f"last_candle:{self.settings.trading_mode}:{symbol.upper()}:{timeframe}"
+        )
+
+    def _is_new_candle(
+        self,
+        symbol: str,
+        timeframe: str,
+        decision: StrategyDecision,
+    ) -> bool:
+        if decision.candle_close_time is None:
+            return True
+        key = self._last_candle_key(symbol, timeframe)
+        current = decision.candle_close_time.isoformat()
+        previous = self.runtime.get(key)
+        return previous != current
+
+    def _mark_candle_processed(
+        self,
+        symbol: str,
+        timeframe: str,
+        decision: StrategyDecision,
+    ) -> None:
+        if decision.candle_close_time is None:
+            return
+        self.runtime.set(
+            self._last_candle_key(symbol, timeframe),
+            decision.candle_close_time.isoformat(),
+        )
+
     def _open_trade_for_symbol(self, symbol: str) -> Trade | None:
         return self.db.execute(
             select(Trade).where(
@@ -140,7 +229,9 @@ class TradingEngine:
             equity = self.settings.paper_initial_capital + self.portfolio.realized_pnl(mode)
             for trade in open_trades:
                 current = await self.market.ticker_price(trade.symbol)
-                equity += float(trade.quantity) * (current - float(trade.entry_price))
+                equity += float(trade.quantity) * (
+                    current - float(trade.entry_price)
+                )
             return equity
 
         quote_balance = await self.broker.quote_balance(self.settings.quote_asset)
@@ -149,6 +240,42 @@ class TradingEngine:
             current = await self.market.ticker_price(trade.symbol)
             equity += float(trade.quantity) * current
         return equity
+
+    async def _execute_market_safely(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: float,
+        reference_price: float,
+        client_order_id: str,
+        trade: Trade | None = None,
+    ) -> ExecutionResult:
+        try:
+            return await self.broker.execute_market(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                reference_price=reference_price,
+                client_order_id=client_order_id,
+            )
+        except BinanceAPIError as exc:
+            if self.settings.trading_mode == "LIVE" and exc.unknown_execution:
+                if trade is not None:
+                    trade.protection_status = "UNKNOWN"
+                    trade.last_error = str(exc)
+                self._halt_live(
+                    reason="Binance order execution state is unknown; manual reconciliation required",
+                    symbol=symbol,
+                    context={
+                        "side": side,
+                        "client_order_id": client_order_id,
+                        "error": str(exc),
+                        "trade_id": trade.id if trade else None,
+                    },
+                )
+                self.db.commit()
+            raise
 
     async def process_symbol(
         self,
@@ -161,14 +288,48 @@ class TradingEngine:
         if symbol not in self.settings.symbols:
             raise ValueError(f"{symbol} is not in configured SYMBOLS_CSV")
 
+        if not self._acquire_symbol_lock(symbol, interval):
+            self.db.rollback()
+            return {
+                "action": "LOCKED",
+                "symbol": symbol,
+                "reason": "Another process is already handling this symbol/timeframe",
+            }
+
+        halt = self.runtime.live_halt()
+        if self.settings.trading_mode == "LIVE" and halt:
+            self.db.commit()
+            return {
+                "action": "HALTED",
+                "symbol": symbol,
+                "halt": halt,
+            }
+
         decision = await self.analyze(symbol, interval)
-        self._persist_signal(symbol, interval, decision)
+        new_candle = self._is_new_candle(symbol, interval, decision)
+
+        if new_candle:
+            self._persist_signal(symbol, interval, decision)
+            self._mark_candle_processed(symbol, interval, decision)
 
         open_trade = self._open_trade_for_symbol(symbol)
         if open_trade:
-            result = await self._manage_open_trade(open_trade, decision)
+            result = await self._manage_open_trade(
+                open_trade,
+                decision,
+                allow_strategy_exit=new_candle,
+            )
             self.db.commit()
             return result
+
+        if not new_candle:
+            self.db.commit()
+            return {
+                "action": "NO_NEW_CANDLE",
+                "symbol": symbol,
+                "signal": decision.signal,
+                "score": decision.score,
+            }
 
         if decision.signal != "BUY":
             self.db.commit()
@@ -202,12 +363,11 @@ class TradingEngine:
                 "reasons": risk_decision.reasons,
             }
 
-        return await self._open_position(symbol, interval, decision, equity)
+        return await self._open_position(symbol, decision, equity)
 
     async def _open_position(
         self,
         symbol: str,
-        timeframe: str,
         decision: StrategyDecision,
         equity: float,
     ) -> dict:
@@ -223,8 +383,13 @@ class TradingEngine:
         if quantity <= 0:
             raise RiskRejectedError("Calculated position size is zero")
 
-        client_order_id = f"BT{int(time.time() * 1000)}{symbol}"[:36]
-        execution = await self.broker.execute_market(
+        candle_ms = (
+            int(decision.candle_close_time.timestamp() * 1000)
+            if decision.candle_close_time
+            else int(time.time() * 1000)
+        )
+        client_order_id = f"BT{symbol}{candle_ms}"[:36]
+        execution = await self._execute_market_safely(
             symbol=symbol,
             side="BUY",
             quantity=quantity,
@@ -265,7 +430,7 @@ class TradingEngine:
                     quantity=execution.quantity,
                     take_profit=take_profit,
                     stop_loss=stop_loss,
-                    client_order_id=f"OCO{trade.id}{int(time.time())}"[:36],
+                    client_order_id=f"OCO{trade.id}{candle_ms}"[:36],
                 )
                 trade.protection_order_list_id = oco_id
                 trade.protection_status = "ACTIVE"
@@ -280,13 +445,22 @@ class TradingEngine:
                     context={"trade_id": trade.id},
                 )
 
-                if not exc.unknown_execution:
-                    emergency = await self.broker.execute_market(
+                if exc.unknown_execution:
+                    self._halt_live(
+                        reason=(
+                            "OCO protection state is unknown; manual reconciliation required"
+                        ),
+                        symbol=symbol,
+                        context={"trade_id": trade.id, "error": str(exc)},
+                    )
+                else:
+                    emergency = await self._execute_market_safely(
                         symbol=symbol,
                         side="SELL",
                         quantity=float(trade.quantity),
                         reference_price=decision.price,
-                        client_order_id=f"EMG{int(time.time() * 1000)}"[:36],
+                        client_order_id=f"EMG{trade.id}{candle_ms}"[:36],
+                        trade=trade,
                     )
                     self._finalize_trade(trade, emergency, "PROTECTION_FAILED")
                     trade.protection_status = "FAILED_CLOSED"
@@ -308,8 +482,18 @@ class TradingEngine:
         self,
         trade: Trade,
         decision: StrategyDecision,
+        *,
+        allow_strategy_exit: bool,
     ) -> dict:
-        current_price = decision.price
+        current_price = await self.market.ticker_price(trade.symbol)
+
+        if self.settings.trading_mode == "LIVE" and trade.protection_status == "UNKNOWN":
+            return {
+                "action": "MANUAL_RECONCILIATION",
+                "trade_id": trade.id,
+                "symbol": trade.symbol,
+                "reason": trade.last_error or "Protection/order state is unknown",
+            }
 
         if (
             self.settings.trading_mode == "LIVE"
@@ -323,29 +507,55 @@ class TradingEngine:
             if fill:
                 self._finalize_trade(trade, fill, "EXCHANGE_PROTECTION")
                 trade.protection_status = "FILLED"
-                return {"action": "CLOSED", "trade_id": trade.id, "reason": "EXCHANGE_PROTECTION"}
+                return {
+                    "action": "CLOSED",
+                    "trade_id": trade.id,
+                    "reason": "EXCHANGE_PROTECTION",
+                }
 
-            if decision.signal == "SELL":
-                await self.broker.cancel_protection(
-                    symbol=trade.symbol,
-                    order_list_id=trade.protection_order_list_id,
-                )
+            if allow_strategy_exit and decision.signal == "SELL":
+                try:
+                    await self.broker.cancel_protection(
+                        symbol=trade.symbol,
+                        order_list_id=trade.protection_order_list_id,
+                    )
+                except BinanceAPIError as exc:
+                    if exc.unknown_execution:
+                        trade.protection_status = "UNKNOWN"
+                        trade.last_error = str(exc)
+                        self._halt_live(
+                            reason=(
+                                "OCO cancellation state is unknown; "
+                                "manual reconciliation required"
+                            ),
+                            symbol=trade.symbol,
+                            context={"trade_id": trade.id, "error": str(exc)},
+                        )
+                        self.db.commit()
+                    raise
+
                 trade.protection_status = "CANCELLED"
-                execution = await self.broker.execute_market(
+                execution = await self._execute_market_safely(
                     symbol=trade.symbol,
                     side="SELL",
                     quantity=float(trade.quantity),
                     reference_price=current_price,
-                    client_order_id=f"EXIT{int(time.time() * 1000)}"[:36],
+                    client_order_id=f"EXIT{trade.id}{int(time.time())}"[:36],
+                    trade=trade,
                 )
                 self._finalize_trade(trade, execution, "STRATEGY_EXIT")
-                return {"action": "CLOSED", "trade_id": trade.id, "reason": "STRATEGY_EXIT"}
+                return {
+                    "action": "CLOSED",
+                    "trade_id": trade.id,
+                    "reason": "STRATEGY_EXIT",
+                }
 
             return {
                 "action": "HOLD",
                 "trade_id": trade.id,
                 "symbol": trade.symbol,
                 "score": decision.score,
+                "current_price": current_price,
                 "protection_status": trade.protection_status,
             }
 
@@ -354,7 +564,7 @@ class TradingEngine:
             exit_reason = "STOP_LOSS"
         elif current_price >= float(trade.take_profit):
             exit_reason = "TAKE_PROFIT"
-        elif decision.signal == "SELL":
+        elif allow_strategy_exit and decision.signal == "SELL":
             exit_reason = "STRATEGY_EXIT"
 
         if exit_reason is None:
@@ -363,18 +573,24 @@ class TradingEngine:
                 "trade_id": trade.id,
                 "symbol": trade.symbol,
                 "score": decision.score,
+                "current_price": current_price,
                 "protection_status": trade.protection_status,
             }
 
-        execution = await self.broker.execute_market(
+        execution = await self._execute_market_safely(
             symbol=trade.symbol,
             side="SELL",
             quantity=float(trade.quantity),
             reference_price=current_price,
-            client_order_id=f"EXIT{int(time.time() * 1000)}"[:36],
+            client_order_id=f"EXIT{trade.id}{int(time.time())}"[:36],
+            trade=trade,
         )
         self._finalize_trade(trade, execution, exit_reason)
-        return {"action": "CLOSED", "trade_id": trade.id, "reason": exit_reason}
+        return {
+            "action": "CLOSED",
+            "trade_id": trade.id,
+            "reason": exit_reason,
+        }
 
     def _finalize_trade(
         self,
@@ -383,10 +599,14 @@ class TradingEngine:
         exit_reason: str,
     ) -> None:
         entry_notional = float(trade.quantity) * float(trade.entry_price)
-        gross_pnl = float(trade.quantity) * (execution.fill_price - float(trade.entry_price))
+        gross_pnl = float(trade.quantity) * (
+            execution.fill_price - float(trade.entry_price)
+        )
         total_fees = float(trade.fees_quote or 0) + execution.fee_quote
         net_pnl = gross_pnl - total_fees
-        pnl_percent = (net_pnl / entry_notional * 100) if entry_notional > 0 else 0.0
+        pnl_percent = (
+            net_pnl / entry_notional * 100 if entry_notional > 0 else 0.0
+        )
 
         trade.status = "CLOSED"
         trade.exit_price = Decimal(str(execution.fill_price))

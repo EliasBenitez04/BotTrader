@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.db.models import BacktestRun, RiskEvent, Signal, Trade
 from app.services.portfolio import PortfolioStateService
+from app.services.runtime_state import RuntimeStateService
 
 
 class DashboardService:
@@ -14,6 +15,7 @@ class DashboardService:
         self.db = db
         self.settings = settings
         self.portfolio = PortfolioStateService(db)
+        self.runtime = RuntimeStateService(db)
 
     def summary(self) -> dict:
         mode = self.settings.trading_mode
@@ -45,6 +47,11 @@ class DashboardService:
                         "score": signal.score,
                         "price": float(signal.price),
                         "rsi": float(signal.rsi or 0),
+                        "candle_close_time": (
+                            signal.candle_close_time.isoformat()
+                            if signal.candle_close_time
+                            else None
+                        ),
                         "created_at": signal.created_at.isoformat(),
                     }
                 )
@@ -62,11 +69,14 @@ class DashboardService:
         return {
             "mode": mode,
             "live_armed": self.settings.live_is_armed,
+            "live_halt": self.runtime.live_halt(),
             "binance_testnet": self.settings.binance_use_testnet,
             "paper_initial_capital": self.settings.paper_initial_capital,
             "realized_pnl": realized,
             "paper_equity_realized": (
-                self.settings.paper_initial_capital + realized if mode == "PAPER" else None
+                self.settings.paper_initial_capital + realized
+                if mode == "PAPER"
+                else None
             ),
             "closed_trades": len(all_closed),
             "winning_trades": len(wins),

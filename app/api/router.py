@@ -9,9 +9,10 @@ from app.core.config import get_settings
 from app.db.models import BacktestRun
 from app.db.session import get_db
 from app.market.binance import SUPPORTED_INTERVALS
-from app.schemas import BacktestRequest, TickRequest
+from app.schemas import BacktestRequest, HaltClearRequest, TickRequest
 from app.services.backtest_service import BacktestService
 from app.services.dashboard import DashboardService
+from app.services.runtime_state import RuntimeStateService
 from app.services.trading_engine import TradingEngine
 
 router = APIRouter(prefix="/api/v1")
@@ -23,11 +24,13 @@ AdminDep = Annotated[None, Depends(require_admin_token)]
 async def health(db: DbDep) -> dict:
     db.execute(text("SELECT 1"))
     settings = get_settings()
+    halt = RuntimeStateService(db).live_halt()
     return {
         "status": "ok",
         "database": "ok",
         "trading_mode": settings.trading_mode,
         "live_armed": settings.live_is_armed,
+        "live_halt": halt,
         "binance_testnet": settings.binance_use_testnet,
     }
 
@@ -54,6 +57,8 @@ async def analyze_market(
         "signal": decision.signal,
         "score": decision.score,
         "price": decision.price,
+        "candle_open_time": decision.candle_open_time,
+        "candle_close_time": decision.candle_close_time,
         "indicators": {
             "ema20": decision.ema20,
             "ema50": decision.ema50,
@@ -114,11 +119,15 @@ def list_backtests(
             "end_time": row.end_time,
             "total_trades": row.total_trades,
             "win_rate": float(row.win_rate),
-            "profit_factor": float(row.profit_factor) if row.profit_factor is not None else None,
+            "profit_factor": (
+                float(row.profit_factor) if row.profit_factor is not None else None
+            ),
             "max_drawdown": float(row.max_drawdown),
             "return_pct": float(row.return_pct),
             "expectancy_pct": float(row.expectancy_pct),
-            "sharpe_ratio": float(row.sharpe_ratio) if row.sharpe_ratio is not None else None,
+            "sharpe_ratio": (
+                float(row.sharpe_ratio) if row.sharpe_ratio is not None else None
+            ),
             "statistically_sufficient": row.statistically_sufficient,
             "created_at": row.created_at,
         }
@@ -151,11 +160,45 @@ def trading_status(db: DbDep) -> dict:
     return {
         "mode": summary["mode"],
         "live_armed": summary["live_armed"],
+        "live_halt": summary["live_halt"],
         "binance_testnet": summary["binance_testnet"],
         "open_positions": len(summary["open_trades"]),
         "closed_trades": summary["closed_trades"],
         "realized_pnl": summary["realized_pnl"],
         "win_rate": summary["win_rate"],
+    }
+
+
+@router.get("/trading/halt")
+def live_halt_status(db: DbDep) -> dict:
+    return {
+        "halt": RuntimeStateService(db).live_halt(),
+    }
+
+
+@router.post("/trading/halt/clear")
+def clear_live_halt(
+    request: HaltClearRequest,
+    db: DbDep,
+    _: AdminDep,
+) -> dict:
+    if not request.confirm_reconciled:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Confirm that Binance orders and balances were manually reconciled "
+                "before clearing the halt"
+            ),
+        )
+
+    runtime = RuntimeStateService(db)
+    previous = runtime.live_halt()
+    runtime.clear_live_halt()
+    db.commit()
+    return {
+        "cleared": True,
+        "previous_halt": previous,
+        "note": request.note,
     }
 
 

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from math import isfinite
 
 import pandas as pd
@@ -21,6 +22,14 @@ class StrategyDecision:
     atr: float
     atr_pct: float
     volume_ratio: float
+    candle_open_time: datetime | None
+    candle_close_time: datetime | None
+
+
+def _as_datetime(value: object) -> datetime | None:
+    if value is None or pd.isna(value):
+        return None
+    return pd.Timestamp(value).to_pydatetime()
 
 
 def _number(value: object, default: float = 0.0) -> float:
@@ -124,6 +133,8 @@ def score_row(
         atr=atr_value,
         atr_pct=atr_pct,
         volume_ratio=volume_ratio,
+        candle_open_time=_as_datetime(row.get("open_time")),
+        candle_close_time=_as_datetime(row.get("close_time")),
     )
 
 

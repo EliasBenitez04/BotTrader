@@ -66,8 +66,11 @@ class PortfolioStateService:
                 .limit(50)
             ).scalars()
         )
+        today = datetime.now(UTC).date()
         count = 0
         for trade in trades:
+            if trade.exit_time is None or trade.exit_time.date() != today:
+                break
             if float(trade.pnl_quote or 0) < 0:
                 count += 1
             else:

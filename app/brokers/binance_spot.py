@@ -135,11 +135,14 @@ class BinanceSpotBroker(Broker):
         symbol: str,
         quantity: float,
         reference_price: float,
+        market_order: bool = True,
     ) -> tuple[float, dict[str, Any]]:
         info = await self._symbol_info(symbol)
-        lot = self._filter(info, "MARKET_LOT_SIZE")
-        if not lot or Decimal(str(lot.get("stepSize", "0"))) <= 0:
-            lot = self._filter(info, "LOT_SIZE")
+        lot = self._filter(info, "LOT_SIZE")
+        if market_order:
+            market_lot = self._filter(info, "MARKET_LOT_SIZE")
+            if market_lot and Decimal(str(market_lot.get("stepSize", "0"))) > 0:
+                lot = market_lot
         if not lot:
             raise BinanceAPIError(f"No lot-size filter found for {symbol}")
 
@@ -152,7 +155,10 @@ class BinanceSpotBroker(Broker):
                 f"Normalized quantity {normalized} violates quantity filters for {symbol}"
             )
 
-        notional_filter = self._filter(info, "NOTIONAL") or self._filter(info, "MIN_NOTIONAL")
+        notional_filter = self._filter(info, "NOTIONAL") or self._filter(
+            info,
+            "MIN_NOTIONAL",
+        )
         if notional_filter:
             min_notional = Decimal(str(notional_filter.get("minNotional", "0")))
             notional = normalized * Decimal(str(reference_price))
@@ -255,6 +261,7 @@ class BinanceSpotBroker(Broker):
             symbol=symbol,
             quantity=quantity,
             reference_price=stop_loss,
+            market_order=False,
         )
         tp = await self.normalize_price(symbol, take_profit)
         sl = await self.normalize_price(symbol, stop_loss)
@@ -313,13 +320,14 @@ class BinanceSpotBroker(Broker):
             if executed_qty <= 0:
                 continue
 
+            estimated_fee = quote_qty * self.settings.trading_fee_bps / 10_000
             return ExecutionResult(
                 symbol=symbol.upper(),
                 side="SELL",
                 quantity=executed_qty,
                 fill_price=(quote_qty / executed_qty) if quote_qty > 0 else 0.0,
                 quote_quantity=quote_qty,
-                fee_quote=0.0,
+                fee_quote=estimated_fee,
                 order_id=str(order_id),
                 client_order_id=detail.get("clientOrderId"),
             )
