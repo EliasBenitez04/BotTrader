@@ -3,6 +3,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
@@ -127,7 +128,12 @@ class BacktestTrade(Base):
     __tablename__ = "backtest_trades"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    backtest_run_id = Column(BigInteger, nullable=False, index=True)
+    backtest_run_id = Column(
+        BigInteger,
+        ForeignKey("backtest_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     entry_time = Column(DateTime(timezone=True), nullable=False)
     exit_time = Column(DateTime(timezone=True), nullable=False)
     quantity = Column(Numeric(28, 12), nullable=False)

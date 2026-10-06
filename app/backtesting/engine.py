@@ -284,9 +284,7 @@ class Backtester:
 
         gross_profit = sum(trade.pnl_quote for trade in wins)
         gross_loss = abs(sum(trade.pnl_quote for trade in losses))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (
-            None if gross_profit == 0 else float("inf")
-        )
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
 
         curve = np.asarray(equity_curve, dtype=float)
         peaks = np.maximum.accumulate(curve)

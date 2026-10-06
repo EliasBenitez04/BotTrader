@@ -71,7 +71,10 @@ class BinanceSpotBroker(Broker):
         try:
             response = await self._client.request(method, path, params=payload)
         except httpx.HTTPError as exc:
-            raise BinanceAPIError(f"Binance transport error: {exc}") from exc
+            raise BinanceAPIError(
+                f"Binance transport error: {exc}",
+                unknown_execution=method.upper() in {"POST", "DELETE"},
+            ) from exc
 
         if response.status_code >= 500 and method.upper() in {"POST", "DELETE"}:
             raise BinanceAPIError(
@@ -287,7 +290,10 @@ class BinanceSpotBroker(Broker):
             "/api/v3/orderList",
             {"orderListId": order_list_id},
         )
-        if order_list.get("listOrderStatus") not in {"ALL_DONE", "REJECT"}:
+        status = order_list.get("listOrderStatus")
+        if status == "REJECT":
+            raise BinanceAPIError(f"OCO order list {order_list_id} was rejected")
+        if status != "ALL_DONE":
             return None
 
         for order in order_list.get("orders", []):

@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     binance_recv_window_ms: int = Field(default=5000, ge=1000, le=60000)
     binance_http_timeout_seconds: float = Field(default=15.0, gt=0)
 
+    quote_asset: str = "USDT"
     symbols_csv: str = "BTCUSDT,ETHUSDT,SOLUSDT"
     default_timeframe: str = "5m"
     worker_interval_seconds: int = Field(default=60, ge=10)

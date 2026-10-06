@@ -143,7 +143,7 @@ class TradingEngine:
                 equity += float(trade.quantity) * (current - float(trade.entry_price))
             return equity
 
-        quote_balance = await self.broker.quote_balance("USDT")
+        quote_balance = await self.broker.quote_balance(self.settings.quote_asset)
         equity = quote_balance
         for trade in open_trades:
             current = await self.market.ticker_price(trade.symbol)
